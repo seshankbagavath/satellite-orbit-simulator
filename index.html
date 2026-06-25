@@ -451,25 +451,183 @@ function sizeRenderer() {
   if (camera) { camera.aspect = w / h; camera.updateProjectionMatrix(); }
 }
 
+// ---- Procedural Earth texture: blue ocean + green continent blobs ----
+// Drawn on a 2D canvas so the globe needs no external image. The shapes are
+// stylized (recognizable as land/sea, not a precise map), matching the clean
+// design aesthetic.
+function makeEarthTexture() {
+  const W = 1024, H = 512;
+  const cv = document.createElement('canvas');
+  cv.width = W; cv.height = H;
+  const ctx = cv.getContext('2d');
+
+  // Ocean base (near #D5FFFF, very light blue).
+  ctx.fillStyle = '#D5FFFF';
+  ctx.fillRect(0, 0, W, H);
+
+  // Stylized landmasses as clusters of soft green blobs. Coordinates are in
+  // [lon 0..1, lat 0..1] of the equirectangular map; each entry is a cluster.
+  const land = '#2E6B50';
+  const landDark = '#1F4D3A';
+
+  // Each continent = array of [cx, cy, rx, ry] ellipse blobs (normalized).
+  const continents = [
+    // Americas (left)
+    [[0.20,0.34,0.05,0.10],[0.22,0.46,0.06,0.09],[0.24,0.58,0.05,0.12],[0.22,0.70,0.03,0.08]],
+    // Europe + Africa (center)
+    [[0.50,0.30,0.05,0.06],[0.52,0.46,0.07,0.12],[0.53,0.60,0.05,0.10]],
+    // Asia (center-right, large)
+    [[0.66,0.30,0.10,0.09],[0.74,0.36,0.07,0.07],[0.70,0.26,0.06,0.05]],
+    // Australia (lower right)
+    [[0.82,0.64,0.05,0.05]],
+    // Antarctica hint (bottom band)
+    [[0.50,0.95,0.45,0.05]],
+  ];
+
+  function blob(cx, cy, rx, ry, color) {
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.ellipse(cx*W, cy*H, rx*W, ry*H, 0, 0, Math.PI*2);
+    ctx.fill();
+  }
+
+  // Draw a soft darker underlayer, then the main green, for a little depth.
+  continents.forEach(cluster => {
+    cluster.forEach(([cx,cy,rx,ry]) => blob(cx, cy, rx*1.12, ry*1.12, landDark));
+  });
+  continents.forEach(cluster => {
+    cluster.forEach(([cx,cy,rx,ry]) => blob(cx, cy, rx, ry, land));
+  });
+
+  const tex = new THREE.CanvasTexture(cv);
+  tex.anisotropy = 4;
+  return tex;
+}
+
+// ---- Satellite model factory: a distinct silhouette per orbit type ----
+// Each returns a THREE.Group built from primitives. Kept small and readable;
+// materials use the design palette (charcoal body, green/neutral accents).
+const MAT = {
+  body:   new THREE.MeshPhongMaterial({ color: 0x1E1C19, shininess: 30 }),
+  panel:  new THREE.MeshPhongMaterial({ color: 0x1F4D3A, shininess: 40 }),
+  metal:  new THREE.MeshPhongMaterial({ color: 0x6E6A63, shininess: 50 }),
+  dish:   new THREE.MeshPhongMaterial({ color: 0xFCFBF8, shininess: 20, side: THREE.DoubleSide }),
+  gold:   new THREE.MeshPhongMaterial({ color: 0xC9A24B, shininess: 60 }),
+};
+// All satellite geometry is rendered on top so it's never lost behind the globe.
+function tagOnTop(group) {
+  group.traverse(o => { if (o.isMesh) { o.material.depthTest = false; o.renderOrder = 4; } });
+  return group;
+}
+
+function solarPanels(group, span, h, mat) {
+  for (const s of [-1, 1]) {
+    const panel = new THREE.Mesh(new THREE.BoxGeometry(span, h, 0.02), mat || MAT.panel);
+    panel.position.x = s * (span*0.65);
+    group.add(panel);
+  }
+}
+
+function buildSatellite(kind) {
+  const g = new THREE.Group();
+  switch (kind) {
+    case 'ISS': { // Space station: long truss + multiple panel pairs + modules
+      const truss = new THREE.Mesh(new THREE.CylinderGeometry(0.03,0.03,1.1,8), MAT.metal);
+      truss.rotation.z = Math.PI/2; g.add(truss);
+      for (const x of [-0.36, 0, 0.36]) {
+        const mod = new THREE.Mesh(new THREE.CylinderGeometry(0.08,0.08,0.18,12), MAT.body);
+        mod.rotation.z = Math.PI/2; mod.position.x = x; g.add(mod);
+      }
+      for (const x of [-0.46, 0.46]) {
+        for (const s of [-1,1]) {
+          const p = new THREE.Mesh(new THREE.BoxGeometry(0.34,0.16,0.015), MAT.panel);
+          p.position.set(x, s*0.18, 0); g.add(p);
+        }
+      }
+      break;
+    }
+    case 'Hubble': { // Telescope: tube body + lens hood + two panels
+      const tube = new THREE.Mesh(new THREE.CylinderGeometry(0.13,0.13,0.5,16), MAT.metal);
+      tube.rotation.z = Math.PI/2; g.add(tube);
+      const hood = new THREE.Mesh(new THREE.CylinderGeometry(0.14,0.14,0.1,16), MAT.body);
+      hood.rotation.z = Math.PI/2; hood.position.x = 0.28; g.add(hood);
+      solarPanels(g, 0.34, 0.14);
+      break;
+    }
+    case 'GPS': { // Boxy bus + flat panels + small nadir antenna
+      g.add(new THREE.Mesh(new THREE.BoxGeometry(0.22,0.22,0.22), MAT.body));
+      solarPanels(g, 0.40, 0.20);
+      const ant = new THREE.Mesh(new THREE.CylinderGeometry(0.09,0.12,0.06,12), MAT.gold);
+      ant.position.y = -0.16; g.add(ant);
+      break;
+    }
+    case 'Molniya': { // Dish satellite: bus + big communications dish
+      g.add(new THREE.Mesh(new THREE.BoxGeometry(0.2,0.2,0.2), MAT.body));
+      const dish = new THREE.Mesh(new THREE.SphereGeometry(0.2, 18, 12, 0, Math.PI*2, 0, Math.PI/2.4), MAT.dish);
+      dish.position.set(0, 0.16, 0); g.add(dish);
+      const feed = new THREE.Mesh(new THREE.CylinderGeometry(0.012,0.012,0.16,6), MAT.metal);
+      feed.position.set(0, 0.24, 0); g.add(feed);
+      solarPanels(g, 0.34, 0.16);
+      break;
+    }
+    case 'Geostat.': { // Big boxy comms platform + wide panels + twin dishes
+      g.add(new THREE.Mesh(new THREE.BoxGeometry(0.26,0.24,0.24), MAT.body));
+      solarPanels(g, 0.55, 0.22);
+      for (const s of [-1,1]) {
+        const d = new THREE.Mesh(new THREE.SphereGeometry(0.09,14,10,0,Math.PI*2,0,Math.PI/2.4), MAT.dish);
+        d.position.set(0, s*0.18, 0.1); d.rotation.x = s*0.3; g.add(d);
+      }
+      break;
+    }
+    case 'Polar': { // Compact cubesat: small cube + single offset panel
+      g.add(new THREE.Mesh(new THREE.BoxGeometry(0.16,0.16,0.16), MAT.body));
+      const p = new THREE.Mesh(new THREE.BoxGeometry(0.3,0.14,0.015), MAT.panel);
+      p.position.x = 0.24; g.add(p);
+      break;
+    }
+    default:
+      g.add(new THREE.Mesh(new THREE.SphereGeometry(0.12,16,16), MAT.body));
+  }
+  return tagOnTop(g);
+}
+
+// Replace the satellite's child model with the silhouette for the given kind.
+let currentSatKind = null;
+function setSatelliteModel(kind) {
+  if (kind === currentSatKind || !satellite) return;
+  currentSatKind = kind;
+  // Clear existing children.
+  while (satellite.children.length) satellite.remove(satellite.children[0]);
+  const model = buildSatellite(kind);
+  satellite.add(model);
+}
+
 function initScene() {
   camera = new THREE.PerspectiveCamera(45, canvas.clientWidth/520, 0.1, 2000);
   camera.position.set(20, 12, 20);
   camera.lookAt(0, 0, 0);
 
-  scene.add(new THREE.AmbientLight(0xffffff, 0.85));
-  const dir = new THREE.DirectionalLight(0xffffff, 0.6);
+  scene.add(new THREE.AmbientLight(0xffffff, 1.05));
+  const dir = new THREE.DirectionalLight(0xffffff, 0.45);
   dir.position.set(30, 20, 30); scene.add(dir);
 
-  // Earth — palette-consistent green, soft wireframe overlay.
+  // Earth — light-blue ocean with procedurally-drawn green continents.
+  // The texture is generated in-code on a 2D canvas (no external image), then
+  // wrapped onto the sphere, keeping the app fully self-contained.
   const er = RE * SCALE;
   earth = new THREE.Mesh(
-    new THREE.SphereGeometry(er, 48, 48),
-    new THREE.MeshPhongMaterial({ color: 0x2E6B50, shininess: 8, flatShading: false })
+    new THREE.SphereGeometry(er, 64, 64),
+    new THREE.MeshPhongMaterial({
+      map: makeEarthTexture(),
+      emissive: 0x9fd8d8,        // lift shadowed side toward light cyan
+      emissiveIntensity: 0.35,
+      shininess: 4,
+    })
   );
   scene.add(earth);
   const wire = new THREE.Mesh(
-    new THREE.SphereGeometry(er*1.001, 24, 24),
-    new THREE.MeshBasicMaterial({ color: 0x1F4D3A, wireframe: true, transparent: true, opacity: 0.12 })
+    new THREE.SphereGeometry(er*1.002, 24, 24),
+    new THREE.MeshBasicMaterial({ color: 0x1F4D3A, wireframe: true, transparent: true, opacity: 0.07 })
   );
   scene.add(wire);
 
@@ -503,13 +661,11 @@ function initScene() {
   );
   scene.add(planeMesh);
 
-  // Satellite marker — rendered on top so it's never lost behind the globe.
-  satellite = new THREE.Mesh(
-    new THREE.SphereGeometry(0.22, 16, 16),
-    new THREE.MeshBasicMaterial({ color: 0x1E1C19, depthTest: false })
-  );
-  satellite.renderOrder = 3;
+  // Satellite — a distinct 3D model per orbit type, swapped on preset change.
+  // Scaled up relative to true size so the silhouette is legible at orbit scale.
+  satellite = new THREE.Group();
   scene.add(satellite);
+  setSatelliteModel('ISS');
 
   sizeRenderer();
 }
@@ -602,6 +758,7 @@ Object.keys(PRESETS).forEach((name, idx) => {
     document.getElementById('s-inc').value = p.inc;
     document.getElementById('s-raan').value = p.raan;
     document.getElementById('s-argp').value = p.argp;
+    setSatelliteModel(name);   // distinct silhouette per satellite type
     syncFromControls();
   };
   presetWrap.appendChild(chip);
@@ -667,12 +824,22 @@ function animate() {
     rebuildOrbit();
   }
 
-  // Move satellite along the orbit.
-  if (state.anim && state.a) {
-    nu += dt * (2*Math.PI / Math.max(periodMin(state.a)*0.4, 1));
+  // Move satellite along the orbit, scaled to stay visible at any orbit size.
+  if (state.a) {
+    if (state.anim) {
+      nu += dt * (2*Math.PI / Math.max(periodMin(state.a)*0.4, 1));
+    }
     const p = elementsToPosition(state.a, state.e, state.i, state.raan, state.argp, nu)
                 .multiplyScalar(SCALE);
     satellite.position.copy(p);
+
+    // Scale the model with camera distance so its silhouette reads clearly
+    // whether the orbit is LEO or GEO (constant apparent size).
+    const s = camDist * 0.045;
+    satellite.scale.setScalar(s);
+
+    // Gently spin so the 3D form is readable, and bank panels toward the sun-ish light.
+    satellite.rotation.y += 0.01;
   }
 
   // Camera from spherical coords.
