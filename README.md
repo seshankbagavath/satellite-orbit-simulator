@@ -1,6 +1,3 @@
-[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/seshankbagavath/satellite-orbit-simulator/blob/main/satellite_orbit_simulator.ipynb)
-[![Open Validation In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/seshankbagavath/satellite-orbit-simulator/blob/main/orbit_validation.ipynb)
-
 # 🛰️ Satellite Orbit Simulator
 
 A high-fidelity orbital trajectory propagator written in Python. It integrates the
@@ -9,6 +6,18 @@ augmented with **J2 oblateness** and **atmospheric drag** perturbations, then
 visualizes the results with publication-quality charts.
 
 > **Difficulty:** Advanced · **Core topics:** Orbital mechanics, numerical methods
+
+## 🌐 Live Interactive Demo
+
+**[▶ Launch the web app](https://seshankbagavath.github.io/satellite-orbit-simulator/)**
+
+A zero-install, browser-based orbit explorer: drag sliders to reshape the orbit
+in real time, load real satellites (ISS, Hubble, GPS, Molniya, geostationary,
+polar), and toggle the J2 precession effect — all rendered live in 3D. The
+orbital physics is ported from the validated Python engine and runs entirely in
+your browser (no backend).
+
+---
 
 ---
 
@@ -135,6 +144,8 @@ reference → numerical propagation → quantified comparison.
 
 ```
 satellite-orbit-simulator/
+├── docs/
+│   └── index.html               # Interactive web app (GitHub Pages)
 ├── satellite_orbit_simulator.py     # Core library + demos
 ├── satellite_orbit_simulator.ipynb  # Core Colab notebook
 ├── orbit_validation.py              # Tier-1: SGP4 validation upgrade
@@ -143,6 +154,9 @@ satellite-orbit-simulator/
 ├── README.md
 └── LICENSE
 ```
+
+The web app lives in `docs/` because GitHub Pages can serve a site directly
+from that folder — see deployment steps below.
 
 ## 📜 License
 
