@@ -290,6 +290,49 @@
         <label class="switch"><input type="checkbox" id="t-anim" checked /><span class="slider-sw"></span></label>
       </div>
     </div>
+
+    <!-- ===== Transfer Planner ===== -->
+    <div class="card card-pad" style="margin-top:20px;">
+      <h2>Transfer planner</h2>
+      <p class="sub">Plan a transfer to a new circular orbit.</p>
+
+      <div class="toggle-row" style="border-top:none; padding-top:0;">
+        <div>
+          <div style="font-size:13px;font-weight:500;">Show transfer</div>
+          <div class="hint">Draw the transfer path to the target.</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="t-transfer" /><span class="slider-sw"></span></label>
+      </div>
+
+      <div id="transfer-controls" style="opacity:0.45; pointer-events:none;">
+        <div class="label" style="margin:4px 0 8px;">Method</div>
+        <div class="presets" id="method-chips" style="margin-bottom:14px;">
+          <button class="chip active" data-method="hohmann">Hohmann</button>
+          <button class="chip" data-method="bielliptic">Bi-elliptic</button>
+        </div>
+
+        <div class="control">
+          <div class="control-head"><span class="name">Target altitude</span><span class="val" id="v-talt">35,786 km</span></div>
+          <input type="range" id="s-talt" min="200" max="120000" value="35786" step="100" />
+          <div class="hint">Destination circular-orbit altitude.</div>
+        </div>
+
+        <div class="control" id="rb-control" style="display:none;">
+          <div class="control-head"><span class="name">Intermediate apoapsis</span><span class="val" id="v-rb">150,000 km</span></div>
+          <input type="range" id="s-rb" min="40000" max="600000" value="150000" step="1000" />
+          <div class="hint">Far turnaround point for the three-burn path.</div>
+        </div>
+      </div>
+
+      <div id="transfer-readout" style="display:none; margin-top:6px;">
+        <div style="display:flex; gap:18px; flex-wrap:wrap;">
+          <div class="stat"><span class="figure" id="t-dv" style="font-size:19px;">—</span><span class="label">Total Δv</span></div>
+          <div class="stat"><span class="figure" id="t-tof" style="font-size:19px;">—</span><span class="label">Transfer time</span></div>
+        </div>
+        <div class="hint" id="t-burns" style="margin-top:8px;"></div>
+        <div class="hint" id="t-compare" style="margin-top:8px; padding-top:8px; border-top:1px solid var(--border);"></div>
+      </div>
+    </div>
   </aside>
 
   <!-- ===== Main viewport + explainer ===== -->
@@ -420,6 +463,35 @@ function raanDotJ2(a, e, i) {
 function periodMin(a) { return 2*Math.PI*Math.sqrt(a*a*a/MU) / 60; }
 function circVel(a)   { return Math.sqrt(MU / a); }
 
+// Hohmann transfer between two circular orbits of radius r1, r2 (km).
+// Returns the two burn magnitudes (km/s), total dv, time of flight (s), and
+// the transfer-ellipse semi-major axis for drawing.
+function hohmann(r1, r2) {
+  const at = 0.5*(r1 + r2);
+  const vc1 = Math.sqrt(MU/r1), vc2 = Math.sqrt(MU/r2);
+  const vt1 = Math.sqrt(MU*(2/r1 - 1/at));
+  const vt2 = Math.sqrt(MU*(2/r2 - 1/at));
+  const dv1 = Math.abs(vt1 - vc1);
+  const dv2 = Math.abs(vc2 - vt2);
+  const tof = Math.PI*Math.sqrt(at*at*at/MU);
+  return { dv1, dv2, dvTotal: dv1+dv2, tof, at };
+}
+
+// Bi-elliptic transfer via intermediate apoapsis rb (km). Three burns.
+function bielliptic(r1, r2, rb) {
+  const a1 = 0.5*(r1 + rb), a2 = 0.5*(r2 + rb);
+  const vc1 = Math.sqrt(MU/r1), vc2 = Math.sqrt(MU/r2);
+  const vp1 = Math.sqrt(MU*(2/r1 - 1/a1));
+  const va1 = Math.sqrt(MU*(2/rb - 1/a1));
+  const va2 = Math.sqrt(MU*(2/rb - 1/a2));
+  const vp2 = Math.sqrt(MU*(2/r2 - 1/a2));
+  const dv1 = Math.abs(vp1 - vc1);
+  const dv2 = Math.abs(va2 - va1);
+  const dv3 = Math.abs(vc2 - vp2);
+  const tof = Math.PI*(Math.sqrt(a1*a1*a1/MU) + Math.sqrt(a2*a2*a2/MU));
+  return { dv1, dv2, dv3, dvTotal: dv1+dv2+dv3, tof, a1, a2 };
+}
+
 // ============================================================
 //  PRESETS — real satellite orbital parameters
 // ============================================================
@@ -438,7 +510,7 @@ const PRESETS = {
 const canvas = document.getElementById('viewport');
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
 const scene = new THREE.Scene();
-let camera, earth, orbitLine, orbitGhost, satellite, planeMesh;
+let camera, earth, orbitLine, orbitGhost, satellite, planeMesh, targetOrbit, transferArc;
 const SCALE = 1 / 1000; // km -> scene units
 
 // Camera orbit state (declared early — syncFromControls() writes camDist).
@@ -685,6 +757,23 @@ function initScene() {
   orbitGhost.renderOrder = 2;
   scene.add(orbitGhost);
 
+  // Target circular orbit (dashed) + transfer ellipse, for the planner.
+  targetOrbit = new THREE.Line(
+    new THREE.BufferGeometry(),
+    new THREE.LineDashedMaterial({ color: 0x6E6A63, dashSize: 0.6, gapSize: 0.4,
+                                   transparent: true, opacity: 0.8, depthTest: false })
+  );
+  targetOrbit.renderOrder = 2; targetOrbit.visible = false;
+  scene.add(targetOrbit);
+
+  transferArc = new THREE.Line(
+    new THREE.BufferGeometry(),
+    new THREE.LineBasicMaterial({ color: 0xC9A24B, transparent: true, opacity: 0.95,
+                                  depthTest: false })
+  );
+  transferArc.renderOrder = 3; transferArc.visible = false;
+  scene.add(transferArc);
+
   // Orbit plane (faint tint to visualize inclination / precession).
   planeMesh = new THREE.Mesh(
     new THREE.CircleGeometry(1, 64),
@@ -738,6 +827,92 @@ function updateReadouts() {
   document.getElementById('r-vel').textContent  = circVel(a).toFixed(2) + ' km/s';
 }
 
+// ---- Transfer planner: draw target orbit + transfer path, show budget ----
+const transfer = { on: false, targetAlt: 35786, method: 'hohmann', rb: 150000 };
+
+function updateTransfer() {
+  const show = transfer.on;
+  targetOrbit.visible = show;
+  transferArc.visible = show;
+  document.getElementById('transfer-readout').style.display = show ? 'block' : 'none';
+  if (!show) return;
+
+  // Current orbit's semi-major axis is the starting circular radius.
+  const r1 = state.a;
+  const r2 = RE + transfer.targetAlt;
+  const i = state.i, raan = state.raan, argp = state.argp;
+
+  // Target circular orbit (shared by both methods).
+  const tgtPts = [];
+  for (let k=0; k<=128; k++) {
+    const nu = (k/128)*2*Math.PI;
+    tgtPts.push(elementsToPosition(r2, 0, i, raan, argp, nu).multiplyScalar(SCALE));
+  }
+  targetOrbit.geometry.dispose();
+  targetOrbit.geometry = new THREE.BufferGeometry().setFromPoints(tgtPts);
+  targetOrbit.computeLineDistances();
+
+  // Always compute both budgets so we can show the comparison.
+  const h = hohmann(r1, r2);
+  const rbR = RE + transfer.rb;                 // intermediate radius (from alt)
+  const useBE = transfer.method === 'bielliptic' && rbR > Math.max(r1, r2);
+  let active, arcPts = [];
+
+  if (useBE) {
+    const be = bielliptic(r1, r2, rbR);
+    active = be;
+    // Two half-ellipses: r1 -> rb (peri at r1), then rb -> r2 (peri at r2).
+    const a1 = 0.5*(r1 + rbR), e1 = (rbR - r1)/(rbR + r1);
+    const a2 = 0.5*(r2 + rbR), e2 = (rbR - r2)/(rbR + r2);
+    // First ellipse: periapsis (nu=0) at r1 out to apoapsis (nu=pi) at rb.
+    for (let k=0; k<=128; k++) {
+      const nu = (k/128)*Math.PI;
+      arcPts.push(elementsToPosition(a1, e1, i, raan, argp, nu).multiplyScalar(SCALE));
+    }
+    // Second ellipse: from apoapsis (nu=pi) back to periapsis (nu=2pi) at r2.
+    // argp + pi flips the line of apsides so its periapsis points at r2's side.
+    for (let k=0; k<=128; k++) {
+      const nu = Math.PI + (k/128)*Math.PI;
+      arcPts.push(elementsToPosition(a2, e2, i, raan, argp + Math.PI, nu).multiplyScalar(SCALE));
+    }
+  } else {
+    active = h;
+    const rp = Math.min(r1, r2), ra = Math.max(r1, r2);
+    const at = 0.5*(rp + ra), et = (ra - rp)/(ra + rp);
+    for (let k=0; k<=128; k++) {
+      const nu = (k/128)*Math.PI;
+      arcPts.push(elementsToPosition(at, et, i, raan, argp, nu).multiplyScalar(SCALE));
+    }
+  }
+
+  transferArc.geometry.dispose();
+  transferArc.geometry = new THREE.BufferGeometry().setFromPoints(arcPts);
+
+  // Budget readout for the active method.
+  document.getElementById('t-dv').textContent  = (active.dvTotal*1000).toFixed(0) + ' m/s';
+  document.getElementById('t-tof').textContent = (active.tof/3600).toFixed(1) + ' h';
+  const burns = useBE
+    ? `Burns: ${(active.dv1*1000).toFixed(0)} · ${(active.dv2*1000).toFixed(0)} · ${(active.dv3*1000).toFixed(0)} m/s`
+    : `Burn 1: ${(active.dv1*1000).toFixed(0)} m/s · Burn 2: ${(active.dv2*1000).toFixed(0)} m/s`;
+  document.getElementById('t-burns').textContent = burns;
+
+  // Comparison line: which method wins, and the ratio context.
+  const ratio = Math.max(r1, r2) / Math.min(r1, r2);
+  const cmp = document.getElementById('t-compare');
+  if (transfer.method === 'bielliptic' && rbR <= Math.max(r1, r2)) {
+    cmp.textContent = 'Intermediate apoapsis must exceed the target — increase it to form a valid bi-elliptic path.';
+  } else {
+    const diff = (h.dvTotal - bielliptic(r1, r2, rbR).dvTotal) * 1000;
+    const beBudget = bielliptic(r1, r2, rbR).dvTotal * 1000;
+    const hoBudget = h.dvTotal * 1000;
+    if (beBudget < hoBudget) {
+      cmp.textContent = `At radius ratio ${ratio.toFixed(1)}, bi-elliptic saves ~${(hoBudget-beBudget).toFixed(0)} m/s over Hohmann (but takes far longer).`;
+    } else {
+      cmp.textContent = `At radius ratio ${ratio.toFixed(1)}, Hohmann is cheaper (bi-elliptic only wins above ~11.9).`;
+    }
+  }
+}
+
 // ---- Read controls into state ----
 function syncFromControls() {
   const alt  = +document.getElementById('s-alt').value;
@@ -763,13 +938,23 @@ function syncFromControls() {
 
   rebuildOrbit();
   updateReadouts();
+  updateTransfer();
 
   // Re-frame the camera so the whole orbit comfortably fills the view,
   // regardless of whether it's a low orbit or a distant GEO ring. Low orbits
-  // need extra pull-back so the globe doesn't fill the frame.
+  // need extra pull-back so the globe doesn't fill the frame. When a transfer
+  // to a higher orbit is shown, frame to the larger of the two radii.
   const apo = state.a * (1 + state.e) * SCALE;
   const earthR = RE * SCALE;
-  camDist = Math.max(apo * 2.2, earthR * 3.4);
+  let frameR = apo;
+  if (transfer.on) {
+    frameR = Math.max(apo, (RE + transfer.targetAlt) * SCALE);
+    // Bi-elliptic swings out to the intermediate apoapsis — frame to it.
+    if (transfer.method === 'bielliptic') {
+      frameR = Math.max(frameR, (RE + transfer.rb) * SCALE);
+    }
+  }
+  camDist = Math.max(frameR * 2.2, earthR * 3.4);
 }
 
 // ============================================================
@@ -804,6 +989,42 @@ Object.keys(PRESETS).forEach((name, idx) => {
 });
 document.getElementById('t-j2').addEventListener('change', syncFromControls);
 document.getElementById('t-anim').addEventListener('change', syncFromControls);
+
+// Transfer planner wiring.
+document.getElementById('t-transfer').addEventListener('change', e => {
+  transfer.on = e.target.checked;
+  const ctrls = document.getElementById('transfer-controls');
+  ctrls.style.opacity = transfer.on ? '1' : '0.45';
+  ctrls.style.pointerEvents = transfer.on ? 'auto' : 'none';
+  syncFromControls();
+});
+document.getElementById('s-talt').addEventListener('input', e => {
+  transfer.targetAlt = +e.target.value;
+  document.getElementById('v-talt').textContent =
+    Math.round(transfer.targetAlt).toLocaleString() + ' km';
+  syncFromControls();
+});
+
+// Method chips (Hohmann / Bi-elliptic).
+document.querySelectorAll('#method-chips .chip').forEach(chip => {
+  chip.onclick = () => {
+    document.querySelectorAll('#method-chips .chip').forEach(c => c.classList.remove('active'));
+    chip.classList.add('active');
+    transfer.method = chip.dataset.method;
+    // Show the intermediate-radius slider only for bi-elliptic.
+    document.getElementById('rb-control').style.display =
+      transfer.method === 'bielliptic' ? 'block' : 'none';
+    syncFromControls();
+  };
+});
+
+// Intermediate apoapsis slider (bi-elliptic only).
+document.getElementById('s-rb').addEventListener('input', e => {
+  transfer.rb = +e.target.value;
+  document.getElementById('v-rb').textContent =
+    Math.round(transfer.rb).toLocaleString() + ' km';
+  syncFromControls();
+});
 
 // ---- Mouse orbit controls (lightweight, no external dep) ----
 let dragging = false, lastX = 0, lastY = 0;
